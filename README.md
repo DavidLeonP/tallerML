@@ -13,6 +13,29 @@ Este proyecto construye un modelo de clasificación que predice si un cliente cu
 
 ---
 
+## Análisis Exploratorio de Datos (EDA)
+
+El dataset contiene información histórica de documentos de cuentas por cobrar (tipo `RI` — facturas de venta) desde **enero de 2018 hasta mayo de 2026**.
+
+**¿Está balanceada la data?**
+
+| Estado | Registros | Porcentaje |
+|---|---|---|
+| C (Cerrado/Cancelado) | 14 445 | 95.76 % |
+| P (Pendiente) | 639 | 4.24 % |
+
+La distribución de documentos está muy sesgada hacia documentos cancelados, lo que indica que la mayoría de las facturas se saldan. A nivel de etiqueta de cliente (`cumple_pago_heur`), el desbalance es menos extremo: **≈82 % Cumple / 18 % Riesgo**.
+
+**¿Está normalizada la data?**
+
+No. Los valores monetarios (`importeCobrado`, `importePagado`, `importePendiente`) están en escala natural de dinero y presentan alta dispersión. Se aplica `StandardScaler` dentro del pipeline supervisado.
+
+**¿Hay estacionalidad en las series de tiempo?**
+
+Sí. Al consolidar ventas `RI` por mes se observa que enero, abril, septiembre y octubre concentran mayor volumen de ventas, sugiriendo un patrón de estacionalidad moderada. El rango temporal (2018–2026) permite un análisis robusto de patrones mensuales.
+
+---
+
 ## Pipeline de Machine Learning
 
 ```
@@ -154,6 +177,16 @@ X_test  = emb[emb["split"] == "test"][emb_cols].to_numpy()
 y_test  = emb[emb["split"] == "test"]["cumple_pago_heur"].to_numpy()
 ```
 
+`embeddings.csv` contiene una fila por cliente con las siguientes columnas:
+
+| Grupo | Columnas |
+|---|---|
+| Metadatos | `nroDireccion`, `cutoff`, `n_meses_pre_cutoff`, `n_meses_post_cutoff`, `primer_mes`, `ultimo_mes_pre`, `primer_mes_post` |
+| Métricas pre-cutoff | `total_facturado_pre`, `total_pagado_pre`, `total_pendiente_pre`, `ratio_pago_pre` |
+| Métricas post-cutoff | `ratio_pago_post`, `pct_pendiente_post` |
+| Etiqueta y partición | `cumple_pago_heur`, `split` |
+| Embedding | `emb_0`, `emb_1`, …, `emb_31` |
+
 ---
 
 ## Resultados
@@ -162,25 +195,25 @@ y_test  = emb[emb["split"] == "test"]["cumple_pago_heur"].to_numpy()
 
 | λ óptimo | C óptimo | CV ROC-AUC (10×5 folds) |
 |---|---|---|
-| 3.16 | 0.316 | **0.9926** |
+| 100 | 0.01 | **0.8441** |
 
-La curva de regularización muestra una meseta ancha entre λ ≈ 0.1 y λ ≈ 30, indicando robustez a la elección exacta del hiperparámetro.
+La curva de regularización identifica una zona de mayor regularización como óptima; el modelo se beneficia de controlar la varianza dado el tamaño reducido del conjunto de entrenamiento (163 muestras).
 
 ### Curva de aprendizaje
 
-- Train AUC final (537 muestras): **0.995**
-- CV AUC final: **0.993**
-- Gap train–CV: **< 0.003** → sin sobreajuste ni subajuste
+- Train AUC final (163 muestras): **0.857**
+- CV AUC final: **0.840**
+- Gap train–CV: **≈ 0.017** → ajuste normal, sin sobreajuste ni subajuste significativo
 
 ### Comparación estadística (Wilcoxon signed-rank, 50 folds pareados)
 
-| Modelo | AUC media | AUC std |
-|---|---|---|
-| Regresión Logística L2 | 0.9794 | 0.0268 |
-| Random Forest | 0.9916 | 0.0057 |
+| Modelo | AUC media | AUC std | AUC mín | AUC máx |
+|---|---|---|---|---|
+| Regresión Logística L2 | 0.8441 | 0.0689 | 0.6970 | 0.9773 |
+| Random Forest | 0.8293 | 0.0548 | 0.6753 | 0.9748 |
 
-**p-value = 0.0148** (α = 0.05) → diferencia estadísticamente significativa.  
-Random Forest supera a LR; sin embargo, se recomienda LR para producción por su interpretabilidad.
+**p-value = 0.1321** (α = 0.05) → **no hay evidencia de diferencia estadísticamente significativa**.  
+Ambos modelos muestran desempeño equivalente sobre estos embeddings; se recomienda Regresión Logística para producción por su interpretabilidad y menor costo computacional.
 
 ---
 
@@ -230,6 +263,20 @@ Output reconstruido: [batch, 24, 10]
 
 Loss: MSE(input, output)   — self-supervised, sin etiquetas
 ```
+
+---
+
+## Conclusiones
+
+El pipeline de Transfer Learning implementado — **Time series → LSTM Autoencoder pre-entrenado (self-supervised) → vector embedding → clasificador supervisado** — demostró ser una estrategia efectiva para el problema planteado. El encoder LSTM aprendió representaciones latentes de 32 dimensiones que capturan el comportamiento financiero de cada cliente sin requerir etiquetas durante el pre-entrenamiento, lo que es especialmente valioso dado el desbalance de clases (≈82 % cumplidores / 18 % riesgosos).
+
+La separación temporal mediante un cutoff (enero 2025) garantizó que los features (historial pre-2025) y la etiqueta (comportamiento post-2025) no compartan la misma ventana de tiempo, eliminando el *data leakage* que existiría con un split aleatorio sobre datos autocorrelacionados. El split de clientes en train/test se realizó antes del pre-entrenamiento del autoencoder y del ajuste del escalador, asegurando que ningún cliente del conjunto de prueba influyera en los pesos del modelo ni en las estadísticas de normalización.
+
+La visualización con t-SNE confirmó que el espacio de embeddings presenta estructura geométrica separable entre las clases Cumple y Riesgo, validando visualmente que la representación aprendida de forma self-supervised contiene información discriminativa relevante para la tarea supervisada downstream.
+
+Tanto la Regresión Logística (AUC = 0.8441) como el Random Forest (AUC = 0.8293) muestran desempeño equivalente (Wilcoxon p = 0.1321, sin diferencia significativa al α = 0.05). Se recomienda Regresión Logística para producción por su interpretabilidad y menor costo computacional.
+
+En términos del caso de negocio, el modelo permite concluir que la cartera de clientes de SkynetSmart presenta un perfil de cumplimiento sólido (≈82 % de clientes cumplidores según comportamiento post-2025), lo que **respalda la viabilidad de asumir una obligación financiera de largo plazo** como la adquisición del inmueble. No obstante, se recomienda revisar individualmente el 18 % de clientes clasificados como riesgosos y evaluar su peso en el flujo de efectivo proyectado antes de comprometer la deuda.
 
 ---
 
